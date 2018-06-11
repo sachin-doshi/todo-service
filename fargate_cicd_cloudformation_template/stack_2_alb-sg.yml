@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  VPCStack:
+    Description: VPC Stack Name
+    Type: String
+    Default: fargate-node-template-VPC
+  TagKey:
+    Default: AppType
+    Description: Fargate tagging
+    Type: String
+  TagValue:
+    Default: Fargate-CICD-Node-Template
+    Description: Fargate-CICD-Node-Template
+    Type: String
+Resources :
+  FargateContainerSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Access to the Fargate containers
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${VPCStack}:VPCId'
+      Tags:
+        - Key : !Ref TagKey
+          Value : !Ref TagValue
+  EcsSecurityGroupIngressFromPublicALB:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties: 
+      Description: Ingress from the public ALB
+      GroupId: !Ref 'FargateContainerSecurityGroup'
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref 'PublicLoadBalancerSG'
+  EcsSecurityGroupIngressFromSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from other containers in the same security group
+      GroupId: !Ref 'FargateContainerSecurityGroup'
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref 'FargateContainerSecurityGroup'
+  PublicLoadBalancerSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:      
+      GroupDescription: Access to the public facing load balancer
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${VPCStack}:VPCId'
+      SecurityGroupIngress: # Allow access to ALB from anywhere on the internet
+       - CidrIp: 0.0.0.0/0
+         IpProtocol: -1
+         FromPort : 80
+         ToPort : 80
+      Tags:
+        - Key : !Ref TagKey
+          Value : !Ref TagValue
+  PublicLoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      Name: { "Fn::Sub": [ "${val}-ALB", { "val": {"Ref" : "TagValue" }} ]}
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      LoadBalancerAttributes:
+        - Key : idle_timeout.timeout_seconds
+          Value : '30'
+        - Key : access_logs.s3.enabled
+          Value : false
+      SecurityGroups:
+        - !Ref 'PublicLoadBalancerSG'
+      Subnets: # The load balancer is placed into the public subnets, so that traffic from the internet can reach the load balancer directly via the internet gateway
+        - Fn::ImportValue:
+           !Sub "${VPCStack}:PublicSubnetOne"
+        - Fn::ImportValue:
+           !Sub "${VPCStack}:PublicSubnetTwo"
+      Tags:
+        - Key : !Ref TagKey
+          Value : !Ref TagValue
+  PublicALBTargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /health
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 4
+      VpcId:
+        Fn::ImportValue:
+          !Sub '${VPCStack}:VPCId'
+  PublicLoadBalancerListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    DependsOn:
+      - PublicLoadBalancer
+    Properties:
+      DefaultActions:
+       - TargetGroupArn : !Ref 'PublicALBTargetGroup'
+         Type: forward
+      LoadBalancerArn: !Ref 'PublicLoadBalancer'
+      Port: 80
+      Protocol: HTTP
+Outputs:
+  ExternalUrl:
+    Description: The url of the external load balancer
+    Value: !Join ['', ['http://', !GetAtt 'PublicLoadBalancer.DNSName']]
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ExternalUrl' ] ]
+  # PublicListener:
+  #   Description: The ARN of the public load balancer's Listener
+  #   Value: !Ref PublicLoadBalancerListener
+  #   Export:
+  #     Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PublicListener' ] ]
+  FargateContainerSecurityGroup:
+    Description: A security group used to allow Fargate containers to receive traffic
+    Value: !Ref 'FargateContainerSecurityGroup'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'FargateContainerSecurityGroup' ] ]
+  PublicALBSecurityGroup:
+    Description: A security group used to allow Fargate containers to receive traffic
+    Value: !Ref 'PublicLoadBalancerSG'
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PublicALBSecurityGroup' ] ]
+      
+
+
+
+

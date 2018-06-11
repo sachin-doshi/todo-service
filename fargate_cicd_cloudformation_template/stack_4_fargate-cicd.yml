@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Fargate ECR repository and CICD pipleine set up for cluster/service/task'
+Parameters:
+    ServiceStack:
+      Description: Service Stack.
+      Type: String
+      Default: fargate-node-template-service
+    ClusterName:
+      Description: Cluster Stack.
+      Type: String
+      Default: fargate-node-template-service-ECSCluster-5BRGUBVC5F2L
+    ServiceName:
+      Description: Service Stack.
+      Type: String
+      Default: node-template-service
+    GitHubRepo:
+      Type: String
+      Default: node-template
+    GitHubBranch:
+      Type: String
+      Default: master
+    GitHubToken:
+      Type: String
+      NoEcho: true      
+    GitHubUser:
+      Type: String      
+    ECRRepoURI:
+      Type: String      
+    ECRRepoARN:
+      Type: String      
+    ArtifactBucket:
+      Type: String      
+Resources:
+  CodeBuildServiceRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      # ManagedPolicyArns:
+      #   - String
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+              - Resource: !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Ref ECRRepoARN
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+  CodePipelineServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      # ManagedPolicyArns:
+      #   - String
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource:
+                  - !Sub arn:aws:s3:::${ArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:DescribeTaskDefinition
+                  - ecs:DescribeTasks
+                  - ecs:ListTasks
+                  - ecs:RegisterTaskDefinition
+                  - ecs:UpdateService
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - iam:PassRole
+  CodeBuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties: 
+      ServiceRole: !Ref CodeBuildServiceRole
+      Description: 'Fargate Node Template Build'
+      Artifacts:
+        Type: CODEPIPELINE
+      BadgeEnabled: false
+      # Cache: 
+      #   ProjectCache      
+      # EncryptionKey: String
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/docker:17.09.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: REPOSITORY_URI
+            Value: !Ref ECRRepoURI
+          - Name: ECS_SERVICE_CONT_NAME
+            Value: node-template-container
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          # env:
+          #   variables:
+          #     key: "value"
+          #     key: "value"
+          #   parameter-store:
+          #     key: "value"
+          #     key: "value"
+          phases:
+            # install:
+            #   commands:
+            #     - command
+            #     - command
+            pre_build:
+              commands:
+                - echo Logging in to Amazon ECR...
+                - aws --version
+                - $(aws ecr get-login --no-include-email)
+                - IMAGE_TAG="$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | head -c 8)"
+                - IMAGE_URI="${REPOSITORY_URI}:${TAG}"
+            build:
+              commands:
+                - echo Build started on `date`
+                - echo Building the Docker image...          
+                - docker build -t $REPOSITORY_URI:latest .
+                - docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG
+            post_build:
+              commands:
+                - echo Build completed on `date`
+                - echo Pushing the Docker images...
+                - docker push $REPOSITORY_URI:latest
+                - docker push $REPOSITORY_URI:$IMAGE_TAG
+                - echo Writing image definitions file...                
+                #- printf '[{"name":"${ECS_SERVICE_NAME}","imageUri":"%s"}]' $REPOSITORY_URI:$IMAGE_TAG > build.json
+                - printf '[{"name":"%s","imageUri":"%s"}]' "$ECS_SERVICE_CONT_NAME" "$REPOSITORY_URI:$IMAGE_TAG" > build.json
+                # echo "{\"Parameters\":{\"Tag\":\"${CODEBUILD_RESOLVED_SOURCE_VERSION}\"}}" > imagedefinitions.json
+          artifacts:
+            files: 
+              - build.json 
+            # discard-paths: yes
+            # base-directory: location
+        # Tags:
+        #   - Resource Tag
+        # TimeoutInMinutes: Integer
+        # Triggers: Triggers
+        # VpcConfig: 
+        #   VpcConfig
+  Pipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      ArtifactStore:
+        # EncryptionKey: EncryptionKey
+        Location: !Ref ArtifactBucket
+        Type: S3
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
+                Category: Source  # Source | Build | Deploy | Test | Invoke | Approval 
+                Owner: ThirdParty # AWS | ThirdParty | Custom 
+                Provider: GitHub
+                Version: 1
+              Configuration:
+                Owner: !Ref GitHubUser #Required
+                Repo: !Ref GitHubRepo #Required
+                PollForSourceChanges: true #Optional
+                Branch : !Ref GitHubBranch #Required
+                OAuthToken : !Ref GitHubToken
+              # InputArtifacts:
+              #   - Name: App
+              OutputArtifacts:
+                - Name: App
+              # RoleArn: String
+              RunOrder: 1
+              # Blockers:
+              #- Blockers
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build  # Source | Build | Deploy | Test | Invoke | Approval 
+                Owner: AWS   # AWS | ThirdParty | Custom 
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName : !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: App
+              OutputArtifacts:
+                - Name: BuildOutput
+              # RoleArn: String
+              RunOrder: 1
+              # Blockers:
+              #   - Blockers
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy  # Source | Build | Deploy | Test | Invoke | Approval 
+                Owner: AWS   # AWS | ThirdParty | Custom 
+                Provider: ECS
+                Version: 1
+              Configuration:
+                ClusterName:
+                  Fn::ImportValue:
+                    !Sub '${ServiceStack}:Cluster'
+                ServiceName: 
+                  Fn::ImportValue:
+                    !Sub '${ServiceStack}:Service'
+                FileName: build.json
+              InputArtifacts:
+                - Name: BuildOutput
+              # RoleArn: String
+              RunOrder: 1
+              # Blockers:
+              #   - Blockers
+Outputs:
+  PipelineUrl:
+    Value: !Sub https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}
+
+
+
+                
+                
+
+

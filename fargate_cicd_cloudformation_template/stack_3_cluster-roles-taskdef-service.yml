@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters :
+  VPCStack:
+    Description: VPC Stack Name
+    Type: String
+    Default: fargate-node-template-VPC
+  ALBStack:
+    Description: ALB Stack
+    Type: String
+    Default: fargate-node-template-alb-sg
+  ServiceName :
+    Type: String
+    Default: fargate-Node-template-service
+    Description: A name for the service-[Family]
+  ImageUrl:
+    Type: String
+    Default: 583688700246.dkr.ecr.us-east-1.amazonaws.com/node-template
+    Description: The url of a docker image that contains the application process that
+                  will handle the traffic for this service
+  ContainerPort:
+    Type: Number
+    Default: 3000
+    Description: What port number the application inside the docker container is binding to
+  ContainerCpu:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemory:
+    Type: Number
+    Default: 1024
+    Description: How much memory in megabytes to give the container
+  Path:
+    Type: String
+    Default: "*"
+    Description: A path on the public load balancer that this service
+                  should be connected to. Use * to send all load balancer
+                  traffic to this service.
+  Priority:
+    Type: Number
+    Default: 1
+    Description: The priority for the routing rule added to the load balancer.
+                  This only applies if your have multiple services which have been
+                  assigned to different paths on the load balancer.
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the service task to run
+  Role:
+    Type: String
+    Default: ""
+    Description: (Optional) An IAM role to give the service's containers if the code within needs to
+                  access other AWS resources like S3 buckets, DynamoDB tables, etc
+Conditions:
+  HasCustomRole: !Not [ !Equals [!Ref 'Role', ''] ]
+Resources :
+  ECSCluster : 
+    Type: "AWS::ECS::Cluster"
+  # This is an IAM role which authorizes ECS to manage resources on your
+  # account on your behalf, such as updating your load balancer with the
+  # details of where your containers are, so that traffic can reach your
+  # containers.
+  ECSRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Statement :
+          - Effect : Allow
+            Principal : 
+              Service: [ecs.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement :
+              - Effect: Allow
+                Action:
+                  # Rules which allow ECS to attach network interfaces to instances
+                  # on your behalf in order for awsvpc networking mode to work right
+                  - 'ec2:AttachNetworkInterface'
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:CreateNetworkInterfacePermission'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:DeleteNetworkInterfacePermission'
+                  - 'ec2:Describe*'
+                  - 'ec2:DetachNetworkInterface'
+                  # Rules which allow ECS to update load balancers on your behalf
+                  # with the information sabout how to send traffic to your containers                  
+                  - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+                  - 'elasticloadbalancing:DeregisterTargets'
+                  - 'elasticloadbalancing:Describe*'
+                  - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+                  - 'elasticloadbalancing:RegisterTargets'
+                Resource: '*'
+  ECSTaskExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument :
+            Statement:
+              - Effect : Allow
+                Action : # Allow the ECS Tasks to download images from ECR
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  # Allow the ECS tasks to upload logs to CloudWatch
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+              - Effect : Allow
+                Action : # Allow the ECS Tasks to download images from ECR
+                  - 's3:*'
+                Resource: '*'
+  TaskDefinition:
+    Type: "AWS::ECS::TaskDefinition"
+    DependsOn: 
+       - ECSTaskExecutionRole
+    Properties:
+      Family: !Ref 'ServiceName'
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !Ref ECSTaskExecutionRole
+      TaskRoleArn:
+        Fn::If:
+          - 'HasCustomRole'
+          - !Ref 'Role'
+          - !Ref "AWS::NoValue"
+      ContainerDefinitions:
+        - Name: node-template-container     #!Ref 'ServiceName'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: !Ref 'ImageUrl'
+          Environment:
+            - Name: AWS_XRAY_DAEMON_ADDRESS
+              Value: ''
+            - Name: API_CNAME
+              Value: '' 
+          PortMappings:
+            - ContainerPort: !Ref 'ContainerPort'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref 'CloudwatchLogsGroup'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: node-template-app
+        - Name: xray-sidecar     #!Ref 'ServiceName'
+          Cpu: 0
+          # Memory: !Ref 'ContainerMemory'
+          Image: 583688700246.dkr.ecr.us-east-1.amazonaws.com/xray-sidecar
+          Essential: true
+          PortMappings:
+            - Protocol: udp
+              ContainerPort: 2000
+              HostPort: 2000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref 'CloudwatchLogsGroup'
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: node-template-app
+      
+        
+
+              
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      #ServiceName: node-template-service
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: !Ref 'DesiredCount'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+             - Fn::ImportValue:
+                !Join [':', [!Ref 'ALBStack', 'FargateContainerSecurityGroup']]
+          Subnets:
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'VPCStack', 'PublicSubnetOne']]
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'VPCStack', 'PublicSubnetTwo']]
+      TaskDefinition: !Ref 'TaskDefinition'
+      LoadBalancers:
+        - ContainerName: node-template-container
+          ContainerPort: !Ref 'ContainerPort'
+          TargetGroupArn: 'arn:aws:elasticloadbalancing:us-east-1:583688700246:targetgroup/farga-Publi-185PG82OILJOF/68393d88857a323f'
+  CloudwatchLogsGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties: 
+      LogGroupName: Fargate-Node-Template
+      RetentionInDays: '7'
+Outputs:
+  Cluster:
+    Description: The ID of the VPC that this stack is deployed in
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Join
+      - ':'
+      - -  !Ref 'AWS::StackName'
+        -  'Cluster'
+  Service:
+    Description: The ID of the VPC that this stack is deployed in
+    Value: !Ref Service
+    Export:
+      Name: !Join
+      - ':'
+      - -  !Ref 'AWS::StackName'
+        -  'Service'
+
+          
+
+    
+            
+
+
+
+
+
+
+
+
